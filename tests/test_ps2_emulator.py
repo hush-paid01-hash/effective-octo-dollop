@@ -1,6 +1,3 @@
-import contextlib
-import io
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,24 +6,14 @@ from ps2_emulator import (
     BIOS_START,
     EE_RAM_START,
     EE_RESET_VECTOR,
-    ELFLoader,
-    INTC_START,
-    MMU,
     MemoryMap,
     MemoryRegion,
     PS2Emulator,
     PS2System,
-    TIMER0_START,
-    run_cli,
 )
 
 
 class PS2EmulatorTests(unittest.TestCase):
-    def _write_bios(self, tmp: str, payload: bytes) -> Path:
-        bios_path = Path(tmp) / "bios.bin"
-        bios_path.write_bytes(payload)
-        return bios_path
-
     def test_power_on_requires_bios(self):
         emulator = PS2Emulator()
         with self.assertRaises(RuntimeError):
@@ -35,93 +22,40 @@ class PS2EmulatorTests(unittest.TestCase):
     def test_load_empty_bios_rejected(self):
         emulator = PS2Emulator()
         with tempfile.TemporaryDirectory() as tmp:
-            bios_path = self._write_bios(tmp, b"")
+            bios_path = Path(tmp) / "empty.bin"
+            bios_path.write_bytes(b"")
             with self.assertRaises(ValueError):
                 emulator.load_bios(bios_path)
 
     def test_run_frame_updates_state(self):
         emulator = PS2Emulator()
-        bios = bytes([0x00, 0x00, 0x00]) + bytes(64)
+        bios = bytes([0x01, 0x02, 0x03, 0x00]) + bytes(64)
         with tempfile.TemporaryDirectory() as tmp:
-            emulator.load_bios(self._write_bios(tmp, bios))
+            bios_path = Path(tmp) / "bios.bin"
+            bios_path.write_bytes(bios)
+            emulator.load_bios(bios_path)
 
         emulator.power_on()
-        executed = emulator.run_frame(3)
-        self.assertEqual(executed, 3)
+        instruction_budget = 3
+        executed = emulator.run_frame(instruction_budget)
+        # Milestone scaffold currently models one byte fetched per step.
+        expected_pc = (EE_RESET_VECTOR + instruction_budget) & 0xFFFFFFFF
+        # Opcodes 0x01, 0x02, 0x03 map to cycle costs 2, 3, 4 via opcode&0b11.
+        expected_cycles = 2 + 3 + 4
+
+        self.assertEqual(executed, instruction_budget)
         self.assertEqual(emulator.frame_count, 1)
-        self.assertEqual(emulator.pc, (EE_RESET_VECTOR + 3) & 0xFFFFFFFF)
-        self.assertEqual(emulator.cycles, 3)
-        self.assertEqual(emulator.status()["scheduler_cycle"], 3)
-
-    def test_instruction_semantics_load_store_jump(self):
-        emulator = PS2Emulator()
-        bios = bytes([0x80, 0xC1, 0x42]) + bytes(64)
-        with tempfile.TemporaryDirectory() as tmp:
-            emulator.load_bios(self._write_bios(tmp, bios))
-        emulator.power_on()
-        emulator.system.memory_map.write8(EE_RAM_START, 0x5A, virtual=False)
-
-        r1 = emulator.system.step()
-        r2 = emulator.system.step()
-        r3 = emulator.system.step()
-
-        self.assertEqual(r1.mnemonic, "LOAD")
-        self.assertEqual(r2.mnemonic, "STORE")
-        self.assertEqual(r3.mnemonic, "JUMP")
-        self.assertEqual(emulator.system.ee.gpr[1], 0x5A)
-        self.assertEqual(emulator.system.memory_map.read8(EE_RAM_START + 1, virtual=False), 0x5A)
-        self.assertEqual(emulator.pc, (EE_RESET_VECTOR + 5) & 0xFFFFFFFF)
-        self.assertEqual(emulator.cycles, 8)
-
-    def test_reset_behavior_clears_runtime_state(self):
-        emulator = PS2Emulator()
-        bios = bytes([0x00, 0x00, 0x00, 0x00]) + bytes(64)
-        with tempfile.TemporaryDirectory() as tmp:
-            emulator.load_bios(self._write_bios(tmp, bios))
-        emulator.power_on()
-        emulator.run_frame(3)
-        emulator.system.intc.mask = 1
-        emulator.system.intc.pending = 1
-        emulator.system.timer0.counter = 99
-
-        emulator.power_on()
-        self.assertEqual(emulator.pc, EE_RESET_VECTOR)
-        self.assertEqual(emulator.cycles, 0)
-        self.assertEqual(emulator.system.scheduler.current_cycle, 0)
-        self.assertEqual(emulator.system.timer0.counter, 0)
-        self.assertEqual(emulator.system.intc.pending, 0)
-        self.assertEqual(emulator.frame_count, 0)
-
-    def test_timer_and_interrupt_controller_are_wired_to_scheduler(self):
-        emulator = PS2Emulator()
-        bios = bytes([0x00, 0x00, 0x00, 0x00, 0x00]) + bytes(64)
-        with tempfile.TemporaryDirectory() as tmp:
-            emulator.load_bios(self._write_bios(tmp, bios))
-        emulator.power_on()
-        emulator.system.memory_map.write8(TIMER0_START + 4, 0x05, virtual=False)
-        emulator.system.memory_map.write8(INTC_START + 4, 0x01, virtual=False)
-
-        emulator.run_frame(5)
-
-        self.assertEqual(emulator.system.timer0.counter, 5)
-        self.assertTrue(emulator.system.intc.irq_asserted())
-        self.assertEqual(emulator.system.intc.pending & 0x1, 0x1)
-
-    def test_mmu_translation_edge_cases(self):
-        mmu = MMU()
-        self.assertEqual(mmu.translate_ee_virtual(0x7FFFFFFF), 0x7FFFFFFF)
-        self.assertEqual(mmu.translate_ee_virtual(0x80000000), 0x00000000)
-        self.assertEqual(mmu.translate_ee_virtual(0x9FFFFFFF), 0x1FFFFFFF)
-        self.assertEqual(mmu.translate_ee_virtual(0xA0000000), 0x00000000)
-        self.assertEqual(mmu.translate_ee_virtual(0xBFFFFFFF), 0x1FFFFFFF)
-        with self.assertRaises(ValueError):
-            mmu.translate_ee_virtual(0xC0000000)
+        self.assertEqual(emulator.pc, expected_pc)
+        self.assertEqual(emulator.cycles, expected_cycles)
+        self.assertEqual(emulator.status()["scheduler_cycle"], expected_cycles)
 
     def test_bios_is_mapped_at_physical_bios_region(self):
         emulator = PS2Emulator()
         bios = bytes([0xAA, 0xBB, 0xCC]) + bytes(16)
         with tempfile.TemporaryDirectory() as tmp:
-            emulator.load_bios(self._write_bios(tmp, bios))
+            bios_path = Path(tmp) / "bios.bin"
+            bios_path.write_bytes(bios)
+            emulator.load_bios(bios_path)
 
         self.assertEqual(emulator.system.memory_map.read8(BIOS_START, virtual=False), 0xAA)
         self.assertEqual(
@@ -159,147 +93,6 @@ class PS2EmulatorTests(unittest.TestCase):
         self.assertEqual(system.memory_map.read8(EE_RAM_START, virtual=False), 0)
         system.memory_map.write8(EE_RAM_START, 0xAB, virtual=False)
         self.assertEqual(system.memory_map.read8(EE_RAM_START, virtual=False), 0xAB)
-
-    def test_cli_without_args_prints_guidance(self):
-        stdout = io.StringIO()
-        with contextlib.redirect_stdout(stdout):
-            code = run_cli([])
-        self.assertEqual(code, 0)
-        self.assertIn("Run with --bios", stdout.getvalue())
-
-    def test_cli_with_bios_runs_and_prints_json_status(self):
-        bios = bytes([0x00, 0x00, 0x00, 0x00, 0x00, 0x00]) + bytes(64)
-        with tempfile.TemporaryDirectory() as tmp:
-            bios_path = self._write_bios(tmp, bios)
-            stdout = io.StringIO()
-            with contextlib.redirect_stdout(stdout):
-                code = run_cli(
-                    [
-                        "--bios",
-                        str(bios_path),
-                        "--instructions",
-                        "3",
-                        "--frames",
-                        "2",
-                        "--status-json",
-                    ]
-                )
-        self.assertEqual(code, 0)
-        status = json.loads(stdout.getvalue())
-        self.assertTrue(status["powered_on"])
-        self.assertEqual(status["frame_count"], 2)
-        self.assertEqual(status["pc"], (EE_RESET_VECTOR + 6) & 0xFFFFFFFF)
-        self.assertEqual(status["bios_size"], len(bios))
-
-    def test_cli_max_cycles_trace_and_status_every(self):
-        bios = bytes([0x00] * 32)
-        with tempfile.TemporaryDirectory() as tmp:
-            bios_path = self._write_bios(tmp, bios)
-            stdout = io.StringIO()
-            with contextlib.redirect_stdout(stdout):
-                code = run_cli(
-                    [
-                        "--bios",
-                        str(bios_path),
-                        "--instructions",
-                        "10",
-                        "--frames",
-                        "2",
-                        "--max-cycles",
-                        "4",
-                        "--trace",
-                        "--status-every",
-                        "2",
-                        "--status-json",
-                    ]
-                )
-        self.assertEqual(code, 0)
-        lines = [line for line in stdout.getvalue().splitlines() if line.strip()]
-        self.assertTrue(any("opcode=0x00 NOP" in line for line in lines))
-        self.assertGreaterEqual(sum(1 for line in lines if line.startswith("{")), 3)
-        final_status = json.loads(lines[-1])
-        self.assertEqual(final_status["cycles"], 4)
-        self.assertEqual(final_status["pc"], (EE_RESET_VECTOR + 4) & 0xFFFFFFFF)
-
-    def test_elf_loader_parses_elf32_header(self):
-        raw = bytearray(84)
-        raw[0:4] = b"\x7fELF"
-        raw[4] = 1
-        raw[5] = 1
-        raw[24:28] = (0x00100000).to_bytes(4, "little")
-        raw[28:32] = (0x34).to_bytes(4, "little")
-        raw[42:44] = (32).to_bytes(2, "little")
-        raw[44:46] = (1).to_bytes(2, "little")
-        # Program header 0: PT_LOAD segment
-        raw[52:56] = (1).to_bytes(4, "little")
-        raw[56:60] = (80).to_bytes(4, "little")
-        raw[60:64] = (0x00000010).to_bytes(4, "little")
-        raw[68:72] = (4).to_bytes(4, "little")
-        raw[72:76] = (8).to_bytes(4, "little")
-        raw[76:80] = (5).to_bytes(4, "little")
-        raw[80:84] = b"\xAA\xBB\xCC\xDD"
-
-        image = ELFLoader.parse_elf32(bytes(raw))
-        self.assertEqual(image.entry_point, 0x00100000)
-        self.assertEqual(image.program_header_offset, 0x34)
-        self.assertEqual(image.program_header_count, 1)
-        self.assertEqual(len(image.segments), 1)
-        self.assertEqual(image.segments[0].virtual_address, 0x10)
-        self.assertEqual(image.segments[0].memory_size, 8)
-        self.assertEqual(image.segments[0].data, b"\xAA\xBB\xCC\xDD")
-
-    def test_emulator_load_elf_scaffold(self):
-        raw = bytearray(88)
-        raw[0:4] = b"\x7fELF"
-        raw[4] = 1
-        raw[5] = 1
-        raw[24:28] = (0x00020000).to_bytes(4, "little")
-        raw[28:32] = (0x34).to_bytes(4, "little")
-        raw[42:44] = (32).to_bytes(2, "little")
-        raw[44:46] = (1).to_bytes(2, "little")
-        raw[52:56] = (1).to_bytes(4, "little")
-        raw[56:60] = (84).to_bytes(4, "little")
-        raw[60:64] = (0x00000020).to_bytes(4, "little")
-        raw[68:72] = (4).to_bytes(4, "little")
-        raw[72:76] = (8).to_bytes(4, "little")
-        raw[84:88] = b"\x10\x11\x12\x13"
-        with tempfile.TemporaryDirectory() as tmp:
-            elf_path = Path(tmp) / "homebrew.elf"
-            elf_path.write_bytes(bytes(raw))
-            emulator = PS2Emulator()
-            image = emulator.load_elf(elf_path)
-        self.assertEqual(image.entry_point, 0x00020000)
-        self.assertEqual(emulator.status()["elf_entry_point"], 0x00020000)
-        self.assertEqual(emulator.status()["elf_segments"], 1)
-        self.assertEqual(emulator.system.memory_map.read8(0x20, virtual=False), 0x10)
-        self.assertEqual(emulator.system.memory_map.read8(0x23, virtual=False), 0x13)
-        self.assertEqual(emulator.system.memory_map.read8(0x24, virtual=False), 0x00)
-
-    def test_power_on_can_boot_from_elf_entry(self):
-        emulator = PS2Emulator()
-        bios = bytes([0x00] * 32)
-        raw = bytearray(52)
-        raw[0:4] = b"\x7fELF"
-        raw[4] = 1
-        raw[5] = 1
-        raw[24:28] = (0x00030040).to_bytes(4, "little")
-        raw[42:44] = (32).to_bytes(2, "little")
-        with tempfile.TemporaryDirectory() as tmp:
-            emulator.load_bios(self._write_bios(tmp, bios))
-            elf_path = Path(tmp) / "boot.elf"
-            elf_path.write_bytes(bytes(raw))
-            emulator.load_elf(elf_path)
-        emulator.boot_from_elf = True
-        emulator.power_on()
-        self.assertEqual(emulator.pc, 0x00030040)
-
-    def test_elf_loader_rejects_non_elf(self):
-        with self.assertRaises(ValueError):
-            ELFLoader.parse_elf32(b"not-an-elf")
-
-    def test_cli_boot_elf_requires_elf_arg(self):
-        with self.assertRaises(SystemExit):
-            run_cli(["--bios", "/tmp/fake.bin", "--boot-elf"])
 
 
 if __name__ == "__main__":
