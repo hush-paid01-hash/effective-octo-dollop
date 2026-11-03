@@ -1,0 +1,24 @@
+# Upsun configuration, generated using AI at: 2026-11-03T06:24:49.827Z
+# AI can make mistakes. Please modify this file to suit your needs.
+applications:
+  ps2-emulator:
+    type: python:3.14
+    build:
+      flavor: none
+    hooks:
+      build: |
+        set -ex
+        pip install --no-cache-dir -r requirements.txt || true
+    web:
+      commands:
+        start: python ps2_emulator.py
+
+# Single Python application with no external services detected.
+# Using latest Python 3.14 runtime from Registry.
+# Build hook installs dependencies if requirements.txt exists, ignoring failure if file is missing.
+# Start command runs the main Python script.
+
+routes:
+  https://{default}/:
+    type: upstream
+    upstream: ps2-emulator:http
