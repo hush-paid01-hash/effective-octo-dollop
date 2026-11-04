@@ -35,6 +35,10 @@ class MemoryRegion:
     _sparse_data: dict[int, int] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        if self.start < 0:
+            raise ValueError(f"{self.name} region start must be non-negative")
+        if self.size <= 0:
+            raise ValueError(f"{self.name} region size must be positive")
         if self.data is None:
             if self.read_only:
                 self.data = bytearray(self.size)
@@ -47,8 +51,14 @@ class MemoryRegion:
     def contains(self, address: int) -> bool:
         return self.start <= address < (self.start + self.size)
 
-    def read8(self, address: int) -> int:
+    def _offset(self, address: int) -> int:
         offset = address - self.start
+        if not 0 <= offset < self.size:
+            raise ValueError(f"{self.name} address out of bounds: 0x{address:X}")
+        return offset
+
+    def read8(self, address: int) -> int:
+        offset = self._offset(address)
         if self.data is not None:
             return self.data[offset]
         return self._sparse_data.get(offset, 0)
@@ -57,7 +67,7 @@ class MemoryRegion:
         if self.read_only:
             raise PermissionError(f"{self.name} is read-only")
         value8 = value & 0xFF
-        offset = address - self.start
+        offset = self._offset(address)
         if self.data is not None:
             self.data[offset] = value8
             return

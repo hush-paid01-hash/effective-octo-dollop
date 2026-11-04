@@ -79,6 +79,28 @@ class PS2EmulatorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             memory_map.map_region(MemoryRegion("B", 0x1080, 0x100))
 
+    def test_memory_region_rejects_invalid_ranges(self):
+        for start, size in ((-1, 1), (0, 0), (0, -1)):
+            with self.subTest(start=start, size=size):
+                with self.assertRaises(ValueError):
+                    MemoryRegion("RAM", start, size)
+
+    def test_memory_region_access_rejects_addresses_outside_region(self):
+        sparse_region = MemoryRegion("Sparse RAM", 0x1000, 4)
+        backed_region = MemoryRegion("Backed RAM", 0x2000, 4, data=bytearray(4))
+
+        for region in (sparse_region, backed_region):
+            with self.subTest(region=region.name, operation="read"):
+                with self.assertRaises(ValueError):
+                    region.read8(region.start - 1)
+                with self.assertRaises(ValueError):
+                    region.read8(region.start + region.size)
+            with self.subTest(region=region.name, operation="write"):
+                with self.assertRaises(ValueError):
+                    region.write8(region.start - 1, 0xAA)
+                with self.assertRaises(ValueError):
+                    region.write8(region.start + region.size, 0xAA)
+
     def test_read_only_region_raw_load_is_internal_only(self):
         bios_region = MemoryRegion("BIOS", BIOS_START, 0x100, read_only=True)
         with self.assertRaises(PermissionError):
